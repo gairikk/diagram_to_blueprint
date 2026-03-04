@@ -1,0 +1,81 @@
+version: "3.9"
+
+services:
+  upload_agent:
+    build:
+      context: .
+      dockerfile: services/upload_agent/Dockerfile
+    volumes:
+      - ./runs:/app/runs
+    ports:
+      - "8001:8000"
+
+  parser_agent:
+    build:
+      context: .
+      dockerfile: services/parser_agent/Dockerfile
+    volumes:
+      - ./runs:/app/runs
+
+  graph_agent:
+    build:
+      context: .
+      dockerfile: services/graph_agent/Dockerfile
+    volumes:
+      - ./runs:/app/runs
+
+  normalizer_agent:
+    build:
+      context: .
+      dockerfile: services/normalizer_agent/Dockerfile
+    volumes:
+      - ./runs:/app/runs
+
+  iac_agent:
+    build:
+      context: .
+      dockerfile: services/iac_agent/Dockerfile
+    volumes:
+      - ./runs:/app/runs
+
+  validate_agent:
+    build:
+      context: .
+      dockerfile: services/validate_agent/Dockerfile
+    volumes:
+      - ./runs:/app/runs
+
+  packager_agent:
+    build:
+      context: .
+      dockerfile: services/packager_agent/Dockerfile
+    volumes:
+      - ./runs:/app/runs
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    volumes:
+      - ./runs:/app/runs
+    ports:
+      - "8000:8000"
+    depends_on:
+      - parser_agent
+      - graph_agent
+      - normalizer_agent
+      - iac_agent
+      - validate_agent
+      - packager_agent
+
+  ui:
+    image: node:18
+    working_dir: /app
+    volumes:
+      - ./ui:/app
+    command: npm run dev -- --host 0.0.0.0
+    ports:
+      - "5173:5173"
+    depends_on:
+      - upload_agent
+      - orchestrator

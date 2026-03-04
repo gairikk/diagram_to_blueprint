@@ -1,0 +1,9 @@
+location = "{{ azure.location | default('eastus') }}"
+
+tags = {
+{% for k, v in tags.items() %}
+  "{{ k }}" = "{{ v }}"
+{% endfor %}
+}
+vm_admin_username = "azureuser"
+vm_admin_password = "REPLACE_ME_SECURELY"

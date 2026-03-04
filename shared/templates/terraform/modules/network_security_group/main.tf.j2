@@ -1,0 +1,48 @@
+variable "name"     { type = string }
+variable "location" { type = string }
+variable "tags"     { type = map(string) }
+
+# Optional: associate NSG to a subnet if subnet_id is provided
+variable "subnet_id" {
+  type    = string
+  default = null
+}
+
+resource "azurerm_resource_group" "rg" {
+  name     = "${var.name}-rg"
+  location = var.location
+  tags     = var.tags
+}
+
+resource "azurerm_network_security_group" "nsg" {
+  name                = "${var.name}-nsg"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  tags                = var.tags
+
+  security_rule {
+    name                       = "allow-ssh-inbound"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "22"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+}
+
+resource "azurerm_subnet_network_security_group_association" "assoc" {
+  count                     = var.subnet_id == null ? 0 : 1
+  subnet_id                 = var.subnet_id
+  network_security_group_id = azurerm_network_security_group.nsg.id
+}
+
+output "resource_group_name" {
+  value = azurerm_resource_group.rg.name
+}
+
+output "nsg_id" {
+  value = azurerm_network_security_group.nsg.id
+}

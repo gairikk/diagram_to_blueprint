@@ -1,0 +1,51 @@
+rules:
+  # --- Networking ---
+  - match:
+      label_contains: ["vnet", "virtual network", "virtual-network", "azure vnet", "hub vnet", "spoke vnet"]
+    emit:
+      resource_type: "azurerm_virtual_network"
+      module: "virtual_network"
+
+  - match:
+      label_contains: ["subnet", "sub-net", "sub network", "network subnet"]
+    emit:
+      resource_type: "azurerm_subnet"
+      module: "subnet"
+
+  - match:
+      label_contains: ["nsg", "network security group", "security group", "netsec group"]
+    emit:
+      resource_type: "azurerm_network_security_group"
+      module: "network_security_group"
+
+  # --- Compute ---
+  - match:
+      label_contains: ["vm", "virtual machine", "compute", "linux vm", "windows vm", "jumpbox", "bastion host"]
+    emit:
+      resource_type: "azurerm_linux_virtual_machine"
+      module: "virtual_machine"
+
+  # --- Your existing rules (keep them too) ---
+  - match:
+      label_contains: ["web ui", "frontend", "spa", "static"]
+    emit:
+      resource_type: "azurerm_static_web_app"
+      module: "static_web_app"
+
+  - match:
+      label_contains: ["upload service", "api", "service", "backend"]
+    emit:
+      resource_type: "azurerm_linux_web_app"
+      module: "linux_web_app"
+
+  - match:
+      label_contains: ["storage", "blob"]
+    emit:
+      resource_type: "azurerm_storage_account"
+      module: "storage_account"
+
+defaults:
+  tags:
+    managed_by: "diagram-to-iac"
+  azure:
+    location: "eastus"

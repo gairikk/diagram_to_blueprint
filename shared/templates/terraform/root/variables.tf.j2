@@ -1,0 +1,19 @@
+variable "location" {
+  type    = string
+  default = "{{ azure.location | default('eastus') }}"
+}
+
+variable "tags" {
+  type    = map(string)
+  default = {}
+}
+variable "vm_admin_username" {
+  type    = string
+  default = "azureuser"
+}
+
+variable "vm_admin_password" {
+  type      = string
+  sensitive = true
+  default   = "ChangeMeNow123!ChangeMeNow123!"
+}

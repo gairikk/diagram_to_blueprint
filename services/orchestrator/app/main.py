@@ -1,154 +1,135 @@
 import os
-import shutil
-import tempfile
-import zipfile
+import uuid
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+import requests
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
-from shared.contracts.envelope import Envelope, ArtifactRef, AgentError
-from shared.storage.local_storage import read_json, write_bytes
+# Create app FIRST to avoid "app not found" if later imports fail
+app = FastAPI(title="orchestrator")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-TEMPLATES_DIR = Path(
-    os.environ.get("TEMPLATES_DIR", "shared/templates/terraform")
-).resolve()
+# --- Lazy imports after app creation ---
+from shared.contracts.envelope import Envelope
+from shared.storage.local_storage import RUNS_DIR
 
+PARSER_URL = os.environ.get("PARSER_URL", "http://parser_agent:8000/run")
+GRAPH_URL = os.environ.get("GRAPH_URL", "http://graph_agent:8000/run")
+NORMALIZER_URL = os.environ.get("NORMALIZER_URL", "http://normalizer_agent:8000/run")
+IAC_URL = os.environ.get("IAC_URL", "http://iac_agent:8000/run")
+VALIDATE_URL = os.environ.get("VALIDATE_URL", "http://validate_agent:8000/run")
+PACKAGER_URL = os.environ.get("PACKAGER_URL", "http://packager_agent:8000/run")
 
-def _zip_dir(src_dir: Path, zip_path: Path) -> None:
-    """Zip the contents of src_dir into zip_path."""
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for p in src_dir.rglob("*"):
-            if p.is_file():
-                z.write(p, p.relative_to(src_dir).as_posix())
+STEP_TIMEOUT = int(os.environ.get("STEP_TIMEOUT", "600"))
 
+class StartRunRequest(BaseModel):
+    run_id: str = ""
+    storage_uri: str
+    artifact_type: str = "drawio"
+    naming: dict = Field(default_factory=lambda: {"prefix": "proj", "env": "dev"})
+    tags: dict = Field(default_factory=dict)
+    azure: dict = Field(default_factory=lambda: {"location": "eastus"})
+    mapping_overrides: list[dict] = Field(default_factory=list)
+    tooling: list[str] = Field(default_factory=lambda: ["terraform", "tflint", "checkov"])
+    include_ado_pipeline: bool = True
 
-def _render(j2: Environment, template_name: str, out_path: Path, ctx: dict) -> None:
-    """Render a template from the jinja environment and write to out_path."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        j2.get_template(template_name).render(**ctx),
-        encoding="utf-8"
-    )
+def _call(url: str, env: Envelope) -> Envelope:
+    r = requests.post(url, json=env.model_dump(), timeout=STEP_TIMEOUT)
+    r.raise_for_status()
+    return Envelope(**r.json())
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
-def _copytree_compat(src: Path, dst: Path) -> None:
-    """
-    Copy directory tree from src to dst.
-    Compatible with Python versions that don't support shutil.copytree(dirs_exist_ok=True).
-    """
-    if not src.exists():
-        raise FileNotFoundError(f"Module template path not found: {src}")
+@app.post("/runs/start")
+def start_run(req: StartRunRequest):
+    rid = req.run_id or str(uuid.uuid4())
 
-    if not dst.exists():
-        shutil.copytree(src, dst)
-        return
+    env = Envelope(run_id=rid, step="parser_agent", input={
+        "storage_uri": req.storage_uri,
+        "artifact_type": req.artifact_type
+    })
+    env = _call(PARSER_URL, env)
+    if env.status == "error":
+        return {"run_id": rid, "failed_step": "parser_agent", "envelope": env.model_dump()}
 
-    # If dst exists, merge-copy files
-    for item in src.rglob("*"):
-        rel = item.relative_to(src)
-        target = dst / rel
-        if item.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item, target)
+    env = Envelope(run_id=rid, step="graph_agent", input={"parsed_uri": env.output["parsed_uri"]})
+    env = _call(GRAPH_URL, env)
+    if env.status == "error":
+        return {"run_id": rid, "failed_step": "graph_agent", "envelope": env.model_dump()}
 
+    env = Envelope(run_id=rid, step="normalizer_agent", input={
+        "graph_uri": env.output["graph_uri"],
+        "naming": req.naming,
+        "tags": req.tags,
+        "azure": req.azure,
+        "mapping_overrides": req.mapping_overrides
+    })
+    env = _call(NORMALIZER_URL, env)
+    if env.status == "error":
+        return {"run_id": rid, "failed_step": "normalizer_agent", "envelope": env.model_dump()}
 
-def run_step(env_dict: dict) -> dict:
-    env = Envelope(**env_dict)
+    normalized_uri = env.output["normalized_uri"]
 
-    try:
-        normalized_uri = env.input["normalized_uri"]
-        normalized = read_json(normalized_uri)
+    env = Envelope(run_id=rid, step="iac_agent", input={"normalized_uri": normalized_uri})
+    env = _call(IAC_URL, env)
+    if env.status == "error":
+        return {"run_id": rid, "failed_step": "iac_agent", "envelope": env.model_dump()}
 
-        resources = normalized.get("resources", [])
-        naming = normalized.get("naming", {"prefix": "proj", "env": "dev"})
-        tags = normalized.get("tags", {})
-        azure = normalized.get("azure", {"location": "eastus"})
+    workspace_zip_uri = env.output["workspace_zip_uri"]
 
-        # StrictUndefined helps catch missing template vars early
-        j2 = Environment(
-            loader=FileSystemLoader(str(TEMPLATES_DIR)),
-            undefined=StrictUndefined,
-            autoescape=False,
-        )
+    env = Envelope(run_id=rid, step="validate_agent", input={
+        "workspace_zip_uri": workspace_zip_uri,
+        "tooling": req.tooling
+    })
+    env = _call(VALIDATE_URL, env)
 
-        with tempfile.TemporaryDirectory() as td_str:
-            td = Path(td_str)
-            (td / "modules").mkdir(parents=True, exist_ok=True)
+    validation_status = env.output.get("status", "fail")
+    report_uri = env.output.get("report_uri")
+    validated_zip_uri = env.output.get("validated_zip_uri") or workspace_zip_uri
 
-            ctx = {"resources": resources, "naming": naming, "tags": tags, "azure": azure}
+    env = Envelope(run_id=rid, step="packager_agent", input={
+        "validated_zip_uri": validated_zip_uri,
+        "normalized_uri": normalized_uri,
+        "report_uri": report_uri,
+        "include_ado_pipeline": req.include_ado_pipeline
+    })
+    env = _call(PACKAGER_URL, env)
+    if env.status == "error":
+        return {"run_id": rid, "failed_step": "packager_agent", "envelope": env.model_dump()}
 
-            # Root terraform files
-            _render(j2, "root/providers.tf.j2", td / "providers.tf", ctx)
-            _render(j2, "root/variables.tf.j2", td / "variables.tf", ctx)
-            _render(j2, "root/main.tf.j2", td / "main.tf", ctx)
-            _render(j2, "root/terraform.tfvars.j2", td / "terraform.tfvars", ctx)
+    return {
+        "run_id": rid,
+        "validation_status": validation_status,
+        "report_uri": report_uri,
+        "repo_zip_uri": env.output.get("repo_zip_uri"),
+        "download": {
+            "repo": f"/runs/{rid}/download/repo",
+            "report": f"/runs/{rid}/download/report"
+        }
+    }
 
-            # Copy modules referenced by resources
-            modules_src = TEMPLATES_DIR / "modules"
+@app.get("/runs/{run_id}/download/repo")
+def download_repo(run_id: str):
+    p = Path(RUNS_DIR) / run_id / "deliverables" / "repo.zip"
+    if not p.exists():
+        return {"error": "repo.zip not found", "path": str(p)}
+    return FileResponse(str(p), media_type="application/zip", filename=f"{run_id}-repo.zip")
 
-            for r in resources:
-                mod = r.get("module") or "resource_group"
-                src = modules_src / mod
-                dst = td / "modules" / mod
-
-                if not src.exists():
-                    # Fallback: create a minimal resource_group module if missing
-                    dst.mkdir(parents=True, exist_ok=True)
-
-                    (dst / "variables.tf").write_text(
-                        'variable "name" {\n'
-                        "  type = string\n"
-                        "}\n\n"
-                        'variable "location" {\n'
-                        "  type = string\n"
-                        "}\n\n"
-                        'variable "tags" {\n'
-                        "  type    = map(string)\n"
-                        "  default = {}\n"
-                        "}\n",
-                        encoding="utf-8",
-                    )
-
-                    (dst / "main.tf").write_text(
-                        'resource "azurerm_resource_group" "rg" {\n'
-                        "  name     = var.name\n"
-                        "  location = var.location\n"
-                        "  tags     = var.tags\n"
-                        "}\n",
-                        encoding="utf-8",
-                    )
-                else:
-                    _copytree_compat(src, dst)
-
-                    # If module template is main.tf.j2, render into main.tf
-                    mt = dst / "main.tf.j2"
-                    if mt.exists():
-                        template_text = mt.read_text(encoding="utf-8")
-                        rendered = Environment(undefined=StrictUndefined).from_string(
-                            template_text
-                        ).render(resource=r, **ctx)
-
-                        (dst / "main.tf").write_text(rendered, encoding="utf-8")
-                        mt.unlink()
-
-            zip_path = td / "workspace.zip"
-            _zip_dir(td, zip_path)
-
-            uri = write_bytes(env.run_id, "iac/workspace.zip", zip_path.read_bytes())
-
-        env.step = "iac_agent"
-        env.output = {"workspace_zip_uri": uri}
-        env.artifacts = [
-            ArtifactRef(name="workspace_zip", uri=uri, content_type="application/zip")
-        ]
-        env.status = "ok"
-        return env.model_dump()
-
-    except Exception as e:
-        env.status = "error"
-        env.errors = [AgentError(code="IAC_FAILED", message=str(e))]
-        env.confidence = 0.0
-        return env.model_dump()
+@app.get("/runs/{run_id}/download/report")
+def download_report(run_id: str):
+    p = Path(RUNS_DIR) / run_id / "validated" / "report.json"
+    if not p.exists():
+        return {"error": "report.json not found", "path": str(p)}
+    return FileResponse(str(p), media_type="application/json", filename=f"{run_id}-report.json")

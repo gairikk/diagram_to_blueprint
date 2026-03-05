@@ -69,7 +69,7 @@ services:
       - packager_agent
 
   ui:
-    image: node:18
+    image: node:22
     working_dir: /app
     volumes:
       - ./ui:/app

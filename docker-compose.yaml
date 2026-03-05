@@ -68,14 +68,14 @@ services:
       - validate_agent
       - packager_agent
 
-  ui:
-    image: node:22
-    working_dir: /app
-    volumes:
-      - ./ui:/app
-    command: npm run dev -- --host 0.0.0.0
-    ports:
-      - "5173:5173"
-    depends_on:
-      - upload_agent
-      - orchestrator
+ui:
+  image: node:22
+  working_dir: /app
+  volumes:
+    - ./ui:/app
+  command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+  ports:
+    - "5173:5173"
+  depends_on:
+    - upload_agent
+    - orchestrator
